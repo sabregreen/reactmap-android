@@ -33,7 +33,7 @@ jobs:
           echo "Missing MAP_URL secret"
           exit 1
         fi
-        if [ -z "${{ secrets.GITHUB_TOKEN }}" ]; then
+        if [ -z "${{ secrets.ACCESS_TOKEN }}" ]; then
           echo "Missing GITHUB_TOKEN secret"
           exit 1
         fi
