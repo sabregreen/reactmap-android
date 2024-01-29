@@ -3,6 +3,7 @@ package be.mygod.reactmap.webkit
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.util.JsonWriter
 import android.util.Log
@@ -13,13 +14,14 @@ import android.webkit.ConsoleMessage
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.coordinatorlayout.widget.CoordinatorLayout
 import androidx.core.net.toUri
 import androidx.core.os.bundleOf
 import androidx.core.view.WindowCompat
@@ -33,6 +35,7 @@ import be.mygod.reactmap.R
 import be.mygod.reactmap.follower.BackgroundLocationReceiver
 import be.mygod.reactmap.util.CreateDynamicDocument
 import be.mygod.reactmap.util.findErrorStream
+import com.google.android.material.snackbar.Snackbar
 import com.google.firebase.analytics.FirebaseAnalytics
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -50,14 +53,14 @@ import java.util.Locale
 class ReactMapFragment @JvmOverloads constructor(private var overrideUri: Uri? = null) : Fragment() {
     companion object {
         private val filenameExtractor = "filename=(\"([^\"]+)\"|[^;]+)".toRegex(RegexOption.IGNORE_CASE)
-        private val vendorJsMatcher = "/vendor-[0-9a-f]{8}\\.js".toRegex()
+        private val vendorJsMatcher = "/vendor-[0-9a-z]{8}\\.js".toRegex(RegexOption.IGNORE_CASE)
         private val flyToMatcher = "/@/([0-9.-]+)/([0-9.-]+)(?:/([0-9.-]+))?/?".toRegex()
         private val mapHijacker = "(?<=[\\n\\r\\s,])this(?=.callInitHooks\\(\\)[,;][\\n\\r\\s]*this._zoomAnimated\\s*=)"
-            .toRegex()
+            .toPattern()
         private val supportedHosts = setOf("discordapp.com", "discord.com", "telegram.org", "oauth.telegram.org")
     }
 
-    private lateinit var web: WebView
+    lateinit var web: WebView
     private lateinit var glocation: Glocation
     private lateinit var siteController: SiteController
     private lateinit var hostname: String
@@ -161,7 +164,7 @@ class ReactMapFragment @JvmOverloads constructor(private var overrideUri: Uri? =
                             true
                         }
                         "http".equals(parsed.scheme, true) -> {
-                            Toast.makeText(view.context, R.string.error_https_only, Toast.LENGTH_SHORT).show()
+                            Snackbar.make(view, R.string.error_https_only, Snackbar.LENGTH_SHORT).show()
                             true
                         }
                         else -> false
@@ -180,6 +183,13 @@ class ReactMapFragment @JvmOverloads constructor(private var overrideUri: Uri? =
                         } else if (vendorJsMatcher.matchEntire(path) != null) handleVendorJs(request) else null
                     }
 
+                override fun onReceivedError(view: WebView?, request: WebResourceRequest, error: WebResourceError) {
+                    if (!request.isForMainFrame) return
+                    Snackbar.make(web, "${error.description} (${error.errorCode})", Snackbar.LENGTH_INDEFINITE).apply {
+                        setAction(R.string.web_refresh) { web.reload() }
+                    }.show()
+                }
+
                 override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                     if (detail.didCrash()) {
                         Timber.w(Exception("WebView crashed @ priority ${detail.rendererPriorityAtExit()}"))
@@ -194,8 +204,8 @@ class ReactMapFragment @JvmOverloads constructor(private var overrideUri: Uri? =
             }
             setDownloadListener { url, _, contentDisposition, mimetype, _ ->
                 if (!url.startsWith("data:", true)) {
-                    Toast.makeText(context, context.getString(R.string.error_unsupported_download, url),
-                        Toast.LENGTH_LONG).show()
+                    Snackbar.make(web, context.getString(R.string.error_unsupported_download, url),
+                        Snackbar.LENGTH_LONG).show()
                     return@setDownloadListener
                 }
                 pendingJson = URLDecoder.decode(url.substringAfter(','), "utf-8")
@@ -205,7 +215,9 @@ class ReactMapFragment @JvmOverloads constructor(private var overrideUri: Uri? =
             }
             loadUrl(activeUrl)
         }
-        return web
+        return CoordinatorLayout(activity).apply {
+            addView(web, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        }
     }
 
     private fun buildResponse(request: WebResourceRequest, transform: (Reader) -> String) = try {
@@ -266,7 +278,18 @@ class ReactMapFragment @JvmOverloads constructor(private var overrideUri: Uri? =
         response
     }
     private fun handleVendorJs(request: WebResourceRequest) = buildResponse(request) { reader ->
-        mapHijacker.replace(reader.readText(), "(window._hijackedMap=this)")
+        val response = reader.readText()
+        val matcher = mapHijacker.matcher(response)
+        if (matcher.find()) (if (Build.VERSION.SDK_INT >= 34) StringBuilder().also {
+            matcher.appendReplacement(it, "(window._hijackedMap=this)")
+            matcher.appendTail(it)
+        } else StringBuffer().also {
+            matcher.appendReplacement(it, "(window._hijackedMap=this)")
+            matcher.appendTail(it)
+        }).toString() else {
+            Timber.w(Exception("vendor.js unmatched"))
+            response
+        }
     }
 
     override fun onDestroyView() {
